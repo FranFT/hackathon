@@ -63,8 +63,20 @@ def transcribe_audio_to_text(filename):
 
 
 # Enters gets Gemini answer to the prompt
-def generate_response(model, prompt):
-    response = model.generate_content(prompt)
+def generate_response(model, question, data):
+    prompt = """
+    You are a helpful assistant who has access to a database of process sessions.
+    It contains information about the process name, process status, process session start time and process session end time.
+    The process status can be 'running', 'stopped', 'completed' and 'terminated'.
+    Answer the following question based on the database information.
+    {user_question}
+    Here is the database information: {database_data}
+    Make sure to summarize format the date time information.
+    """
+
+    response = model.generate_content(
+        prompt.format(user_question=question, database_data=data)
+    )
     return response.text
 
 
@@ -75,10 +87,30 @@ def speak_text(engine, text):
 
 
 # Get the latest data from the database
-def get_updated_data():
-    query = "SELECT BPAProcess.name, BPAStatus.description,	BPASession.startdatetime, BPASession.enddatetime FROM BPASession INNER JOIN BPAProcess on BPASession.processid = BPAProcess.processid INNER JOIN BPAStatus on BPASession.statusid = BPAStatus.statusid WHERE BPAProcess.ProcessType = 'P'"
+def get_process_sessions():
+    query = """
+        SELECT
+            BPAProcess.name,
+            BPAStatus.description,
+            BPASession.startdatetime,
+            BPASession.enddatetime
+        FROM BPASession
+            INNER JOIN BPAProcess on BPASession.processid = BPAProcess.processid
+            INNER JOIN BPAStatus on BPASession.statusid = BPAStatus.statusid
+        WHERE BPAProcess.ProcessType = 'P'
+    """
     cursor.execute(query)
-    sessions = cursor.fetchall()
+    query_output = cursor.fetchall()
+    sessions = list()
+    for session in query_output:
+        sessions.append(
+            {
+                "process_name": session[0],
+                "process_status": session[1],
+                "process_start_time": session[2],
+                "process_end_time": session[3],
+            }
+        )
     return sessions
 
 
@@ -90,20 +122,21 @@ def get_updated_data():
 if __name__ == "__main__":
     ##### SETUP #####
     # What to say to have Gemini listening
-    trigger_command = "hey bot"
+    trigger_command = "hey"
     stop_command = "exit"
-
-    test = get_updated_data()
 
     while True:
         # Wait for user to say "hey"
-        print(f"Say '{trigger_command}' to start recording your question...")
+        print(
+            f"Say '{trigger_command}' to start recording your question or {stop_command} to stop the program."
+        )
         with sr.Microphone() as source:
             recognizer = sr.Recognizer()
             audio = recognizer.listen(source)
             try:
                 transcription = recognizer.recognize_google(audio)
                 if transcription.lower() == trigger_command:
+                    # Get user answer
                     filename = "input.wav"
                     print("Say your question...")
                     with sr.Microphone() as source:
@@ -117,7 +150,10 @@ if __name__ == "__main__":
                     text = transcribe_audio_to_text(filename)
                     if text:
                         print(f"You said: {text}")
-                        response = generate_response(model, text)
+                        # Get latests session info from database
+                        sessions = get_process_sessions()
+                        # Get model response
+                        response = generate_response(model, text, sessions)
                         print("Response: " + response)
                         speak_text(engine, response)
                 elif transcription.lower() == stop_command:
