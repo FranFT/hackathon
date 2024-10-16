@@ -1,6 +1,7 @@
 #################
 #### IMPORTS ####
 #################
+from datetime import date, datetime
 import configparser
 import pyodbc
 import google.generativeai as genai  # AI
@@ -63,19 +64,34 @@ def transcribe_audio_to_text(filename):
 
 
 # Enters gets Gemini answer to the prompt
-def generate_response(model, question, data):
+def generate_response(model, question, sessions_data, items_data):
     prompt = """
-    You are a helpful assistant who has access to a database of process sessions.
+    You are a helpful assistant on {todays_date} who has access to a database of process sessions and the items they have processed.
+    Here is the data for the processes sessions: {sessions_data}
     It contains information about the process name, process status, process session start time and process session end time.
-    The process status can be 'running', 'stopped', 'completed' and 'terminated'.
+    The process status can be 'running', 'stopped', 'completed' and 'terminated'. Here are some rules:
+    A process is completed when the 'process_status' column contains the value 'Completed'.
+    A process is currently running when the 'process_status' column contains the value 'Running'.
+    A process failed when the 'process_status' column contains the value 'Terminated'.
+    Here is the data for the items processed during the provided process sessions above: {items_data}
+    It contains information about the item name, the name of the process that processed it and the workqueue name where it is stored.
+    Here are some rules for the items.
+    A 'process_name' can have one or more 'workqueue_name'.
+    Each 'workqueue_name' can have one or more 'item_key'.
+    Each item belongs to one single 'workqueue_name'.
+    An item is completed when the 'completed' column is not empty.
+    An item is an exception when the 'exception' column is not empty.
     Answer the following question based on the database information.
     {user_question}
-    Here is the database information: {database_data}
-    Make sure to summarize format the date time information.
     """
 
     response = model.generate_content(
-        prompt.format(user_question=question, database_data=data)
+        prompt.format(
+            user_question=question,
+            sessions_data=sessions_data,
+            items_data=items_data,
+            todays_date=date.today(),
+        )
     )
     return response.text
 
@@ -90,14 +106,16 @@ def speak_text(engine, text):
 def get_process_sessions():
     query = """
         SELECT
-            BPAProcess.name,
-            BPAStatus.description,
-            BPASession.startdatetime,
-            BPASession.enddatetime
+            BPAProcess.name as process_name,
+            BPAStatus.description as status,
+            BPASession.startdatetime as start_time,
+            BPASession.enddatetime as end_time
         FROM BPASession
             INNER JOIN BPAProcess on BPASession.processid = BPAProcess.processid
             INNER JOIN BPAStatus on BPASession.statusid = BPAStatus.statusid
         WHERE BPAProcess.ProcessType = 'P'
+            AND BPAStatus.description IN ('Completed', 'Running', 'Terminated', 'Stopped')
+            AND BPASession.startdatetime >= DATEADD(day, -7, GETDATE())
     """
     cursor.execute(query)
     query_output = cursor.fetchall()
@@ -114,6 +132,38 @@ def get_process_sessions():
     return sessions
 
 
+def get_items():
+    query = """
+        SELECT
+            BPVWorkQueueItem.keyvalue as item_key,
+            bpaProcess.name as process_name,
+            BPAProcessQueueDependency.refQueueName as queue_name,
+            BPVWorkQueueItem.completed,
+            BPVWorkQueueItem.exception
+        FROM
+            BPAProcessQueueDependency
+            inner join BPAProcess on BPAProcessQueueDependency.processID = BPAProcess.processid
+            inner join BPAWorkQueue on BPAWorkQueue.name = BPAProcessQueueDependency.refQueueName
+            inner join BPVWorkQueueItem on BPVWorkQueueItem.queueid = BPAWorkQueue.id
+        WHERE
+            BPVWorkQueueItem.loaded >= DATEADD(day, -7, GETDATE())
+    """
+    cursor.execute(query)
+    query_output = cursor.fetchall()
+    items = list()
+    for item in query_output:
+        items.append(
+            {
+                "item_name": item[0],
+                "process_name": item[1],
+                "workqueue_name": item[2],
+                "completed_date": item[3],
+                "exception_date": item[4],
+            }
+        )
+    return items
+
+
 ######################
 #### MAIN ROUTINE ####
 ######################
@@ -121,6 +171,9 @@ def get_process_sessions():
 
 if __name__ == "__main__":
     ##### SETUP #####
+    startup = datetime.now()
+    last_check = startup
+
     # What to say to have Gemini listening
     trigger_command = "hey"
     stop_command = "exit"
@@ -130,37 +183,45 @@ if __name__ == "__main__":
         print(
             f"Say '{trigger_command}' to start recording your question or {stop_command} to stop the program."
         )
+        # CHECK HERE FOR TERMINATIONS AND NOTIFY THEM BY AUDIO
         with sr.Microphone() as source:
             recognizer = sr.Recognizer()
-            audio = recognizer.listen(source)
+            audio = ""
             try:
-                transcription = recognizer.recognize_google(audio)
-                if transcription.lower() == trigger_command:
-                    # Get user answer
-                    filename = "input.wav"
-                    print("Say your question...")
-                    with sr.Microphone() as source:
-                        recognizer = sr.Recognizer()
-                        source.pause_threshold = 1
-                        audio = recognizer.listen(
-                            source, phrase_time_limit=None, timeout=None
-                        )
-                        with open(filename, "wb") as f:
-                            f.write(audio.get_wav_data())
-                    text = transcribe_audio_to_text(filename)
-                    if text:
-                        print(f"You said: {text}")
-                        # Get latests session info from database
-                        sessions = get_process_sessions()
-                        # Get model response
-                        response = generate_response(model, text, sessions)
-                        print("Response: " + response)
-                        speak_text(engine, response)
-                elif transcription.lower() == stop_command:
-                    speak_text(engine, "See you later!")
-                    break
-            except Exception as e:
-                print("An error occurred: {}".format(e))
+                audio = recognizer.listen(source, timeout=5)
+            except:
+                print("Waiting...")
+            if audio:
+                try:
+                    transcription = recognizer.recognize_google(audio)
+                    if transcription.lower() == trigger_command:
+                        # Get user answer
+                        filename = "input.wav"
+                        print("Ask your question...")
+                        with sr.Microphone() as source:
+                            recognizer = sr.Recognizer()
+                            source.pause_threshold = 1
+                            audio = recognizer.listen(
+                                source, phrase_time_limit=None, timeout=None
+                            )
+                            with open(filename, "wb") as f:
+                                f.write(audio.get_wav_data())
+                        text = transcribe_audio_to_text(filename)
+                        if text:
+                            print(f"You said: {text}")
+                            # Get latests session info from database
+                            sessions = get_process_sessions()
+                            items = get_items()
+                            # Get model response
+                            response = generate_response(model, text, sessions, items)
+                            print("Response: " + response)
+                            speak_text(engine, response)
+                    elif transcription.lower() == stop_command:
+                        print("See you later! :)")
+                        speak_text(engine, "See you later!")
+                        break
+                except Exception as e:
+                    print("An error occurred: {}".format(e))
 
 # Close database connection
 conn.close()
