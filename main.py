@@ -64,7 +64,7 @@ def transcribe_audio_to_text(filename):
 
 
 # Enters gets Gemini answer to the prompt
-def generate_response(model, question, sessions_data, items_data):
+def generate_response(question, sessions_data, items_data):
     prompt = """
     You are a helpful assistant on {todays_date} who has access to a database of process sessions and the items they have processed.
     Here is the data for the processes sessions: {sessions_data}
@@ -97,7 +97,7 @@ def generate_response(model, question, sessions_data, items_data):
 
 
 # Transforms the text to voice
-def speak_text(engine, text):
+def speak_text(text):
     engine.say(text)
     engine.runAndWait()
 
@@ -164,6 +164,38 @@ def get_items():
     return items
 
 
+def notify_terminations(end_date_time):
+    output = ""
+    query = """
+            SELECT
+                BPAProcess.name as process_name
+            FROM BPASession
+                INNER JOIN BPAProcess on BPASession.processid = BPAProcess.processid
+                INNER JOIN BPAStatus on BPASession.statusid = BPAStatus.statusid
+            WHERE BPAProcess.ProcessType = 'P'
+                AND BPAStatus.description = 'Terminated'
+                AND BPASession.enddatetime >= ?
+            """
+
+    cursor.execute(query, end_date_time)
+    query_output = cursor.fetchall()
+    if len(query_output) == 0:
+        output = end_date_time
+    elif len(query_output) == 1:
+        speak_text(
+            "Hey bro, the process named '" + query_output[0][0] + "' has terminated."
+        )
+        output = datetime.now()
+    else:
+        processes = ""
+        for row in query_output:
+            processes = processes + row[0] + ", "
+        speak_text("Hey, processes '" + processes + "'")
+        output = datetime.now()
+
+    return output
+
+
 ######################
 #### MAIN ROUTINE ####
 ######################
@@ -175,7 +207,7 @@ if __name__ == "__main__":
     last_check = startup
 
     # What to say to have Gemini listening
-    trigger_command = "hey"
+    trigger_command = "momentum"
     stop_command = "exit"
 
     while True:
@@ -184,6 +216,7 @@ if __name__ == "__main__":
             f"Say '{trigger_command}' to start recording your question or {stop_command} to stop the program."
         )
         # CHECK HERE FOR TERMINATIONS AND NOTIFY THEM BY AUDIO
+        last_check = notify_terminations(last_check)
         with sr.Microphone() as source:
             recognizer = sr.Recognizer()
             audio = ""
@@ -213,12 +246,12 @@ if __name__ == "__main__":
                             sessions = get_process_sessions()
                             items = get_items()
                             # Get model response
-                            response = generate_response(model, text, sessions, items)
+                            response = generate_response(text, sessions, items)
                             print("Response: " + response)
-                            speak_text(engine, response)
+                            speak_text(response)
                     elif transcription.lower() == stop_command:
                         print("See you later! :)")
-                        speak_text(engine, "See you later!")
+                        speak_text("See you later!")
                         break
                 except Exception as e:
                     print("An error occurred: {}".format(e))
