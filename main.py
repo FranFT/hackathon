@@ -207,7 +207,7 @@ if __name__ == "__main__":
     last_check = startup
 
     # What to say to have Gemini listening
-    trigger_command = "momentum"
+    trigger_command = "hey"
     stop_command = "exit"
 
     while True:
